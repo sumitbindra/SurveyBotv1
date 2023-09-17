@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Survey Chatbot</title>
+    <style>
+        /* Add some basic styles for the chat interface */
+        #chatBox {
+            width: 400px;
+            height: 500px;
+            border: 1px solid black;
+            overflow-y: scroll;
+        }
+    </style>
+</head>
+<body>
+    <h2>Interactive Survey Chatbot</h2>
+    <div id="chatBox"></div>
+    <input type="text" id="userInput" placeholder="Type your message...">
+    <button onclick="sendMessage()">Send</button>
+
+    <script>
+        async function sendMessage() {
+            const inputElem = document.getElementById('userInput');
+            const message = inputElem.value;
+            addToChat('User', message);
+            
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: message })
+            });
+
+            const data = await response.json();
+            addToChat('Bot', data.message);
+            
+            inputElem.value = '';  // Clear the input field
+        }
+
+        function addToChat(sender, message) {
+            const chatBox = document.getElementById('chatBox');
+            chatBox.innerHTML += `<b>${sender}:</b> ${message}<br>`;
+            chatBox.scrollTop = chatBox.scrollHeight;  // Auto-scroll to latest message
+        }
+    </script>
+</body>
+</html>
