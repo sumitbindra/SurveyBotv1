@@ -1,117 +1,169 @@
 from flask import Flask, request, jsonify, render_template
 import os
 import openai
-import sqlite3
+import psycopg2
+import json
 
 app = Flask(__name__, template_folder='templates')
 
-DATABASE = "survey.db"
+#DATABASE = "survey.db"
+DATABASE_URL = os.getenv('db_url')  # Replace this with your ElephantSQL URL
+
 openai.api_key = os.getenv('llm_key')  # Replace with your key
 conversation_history = []
+DATA_FILE = "temp_data.json"
 
 # ------- Include the state information here -------
 
 # Global state and context variables
 states = {
-    "name": "What is your name?",
-    "age": "How old are you?",
-    "income": "What is your annual income?",
-    "household": "How many people are in your household?",
-    "vehicles": "How many vehicles do you have?",
-    "children": "How many children do you have?",
-    "completed": "Thank you for providing your information!"
+    "greeting": "Hello! I'm here to collect some demographic information. Type 'ready' to begin.",
+    "name": "Please provide your name.",
+    "age": "Thank you! Next, please tell me your age.",
+    "income": "Thanks. Now, could you let me know your annual income?",
+    "household_count": "Understood. How many people are there in your household?",
+    "vehicle_count": "Got it. How many vehicles do you have?",
+    "children_count": "Thanks. Finally, how many children are there in your household?"
 }
-current_state = "name"
+
+current_state = "greeting"
 
 chat_context = [
     {"role": "system", "content": "You are a survey assistant collecting demographic information."},
     {"role": "assistant", "content": states[current_state]}
 ]
 
+row_id = None
+
 # --------------------------------------------------
 
 def init_db():
-    with sqlite3.connect(DATABASE) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS responses (
-                id INTEGER PRIMARY KEY,
-                name TEXT,
-                age INTEGER,
-                income REAL,
-                household_count INTEGER,
-                vehicle_count INTEGER,
-                children_count INTEGER
-            )
+    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+        cursor = conn.cursor()
+        
+        # Create table - adjust the fields as per your requirement
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS responses (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            age INTEGER,
+            income REAL,
+            household_count INTEGER,
+            vehicle_count INTEGER,
+            children_count INTEGER
+        )
         """)
-
-init_db()
+        
+        conn.commit()
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+@app.route('/init', methods=['GET'])
+def init():
+    return jsonify({"message": states["greeting"]})
+  
 @app.route('/chat', methods=['POST'])
 def chat():
     global current_state
     global chat_context
+    global row_id
 
     user_message = request.json.get('message')
     chat_context.append({"role": "user", "content": user_message})
 
-    # Predefined logic-based checks
-    # Logic checks for name state
-    if current_state == "name":
-        # Save name to the database
-        with sqlite3.connect(DATABASE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO responses (name) VALUES (?)", (user_message,))
-            conn.commit()
+    response_message = ""
 
+    # Always initialize an empty dictionary at the start
+    data = {}
+
+    # Load existing data if the file exists
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as file:
+            data = json.load(file)
+
+    # State handlers
+    if current_state == "greeting":
+        if user_message.lower() == 'ready':
+            response_message = states["name"]
+            current_state = "name"
+        else:
+            response_message = "Type 'ready' to begin."
+    
+    elif current_state == "name":
+        data["name"] = user_message
         response_message = states["age"]
         current_state = "age"
-    # Other logic-based checks
-    elif current_state == "age" and not user_message.isdigit():
-        response_message = "Please provide a valid age."
-    elif current_state == "income" and not user_message.replace('.', '', 1).isdigit():
-        response_message = "Please provide a valid income number."
-    elif current_state == "household" and not user_message.isdigit():
-        response_message = "Please provide a valid number of people in your household."
-    elif current_state == "vehicles" and not user_message.isdigit():
-        response_message = "Please provide a valid number of vehicles."
-    elif current_state == "children" and not user_message.isdigit():
-        response_message = "Please provide a valid number of children."
-    elif current_state == "children" and int(user_message) > int(chat_context[-2]['content']):  # Checking if children > household
-        response_message = "The number of children can't be greater than the number of people in the household. Please provide a valid number."
-    else:
-        # If no immediate logic-based response, get the model's response
-        response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=chat_context)
-        response_message = response.choices[0].message['content']
-        chat_context.append({"role": "assistant", "content": response_message})
 
-        # Save data to the database based on current state
-        with sqlite3.connect(DATABASE) as conn:
-            cursor = conn.cursor()
-            if current_state == "name":
-                cursor.execute("INSERT INTO responses (name) VALUES (?)", (user_message,))
-                current_state = "age"
-            elif current_state == "age":
-                cursor.execute("UPDATE responses SET age = ? WHERE id = last_insert_rowid()", (user_message,))
+    elif current_state == "age":
+        try:
+            age = int(user_message)
+            if 0 < age <= 120:
+                data["age"] = age  # Store the age.
+                response_message = states["income"]  # Ask for income next.
                 current_state = "income"
-            elif current_state == "income":
-                cursor.execute("UPDATE responses SET income = ? WHERE id = last_insert_rowid()", (float(user_message),))
-                current_state = "household"
-            elif current_state == "household":
-                cursor.execute("UPDATE responses SET household_count = ? WHERE id = last_insert_rowid()", (user_message,))
-                current_state = "vehicles"
-            elif current_state == "vehicles":
-                cursor.execute("UPDATE responses SET vehicle_count = ? WHERE id = last_insert_rowid()", (user_message,))
-                current_state = "children"
-            elif current_state == "children":
-                cursor.execute("UPDATE responses SET children_count = ? WHERE id = last_insert_rowid()", (user_message,))
-                current_state = "completed"
-            conn.commit()
+            else:
+                response_message = "Please provide a reasonable age."
+        except ValueError:
+            response_message = "Please provide a valid age."
+    
+    elif current_state == "income":
+        try:
+            income = float(user_message)
+            data["income"] = income
+            response_message = states["household_count"]
+            current_state = "household_count"
+        except ValueError:
+            response_message = "Please provide a valid income amount."
+    
+    elif current_state == "household_count":
+        try:
+            household_count = int(user_message)
+            data["household_count"] = household_count
+            response_message = states["vehicle_count"]
+            current_state = "vehicle_count"
+        except ValueError:
+            response_message = "Please provide a valid number for household count."
+
+    elif current_state == "vehicle_count":
+        try:
+            vehicle_count = int(user_message)
+            data["vehicle_count"] = vehicle_count
+            response_message = states["children_count"]
+            current_state = "children_count"
+        except ValueError:
+            response_message = "Please provide a valid number for vehicle count."
+
+    elif current_state == "children_count":
+        try:
+            children_count = int(user_message)
+            data["children_count"] = children_count
+            #response_message = "Thanks for providing your information!"
+            current_state = "completed"
+        except ValueError:
+            response_message = "Please provide a valid number for children count."
+
+        # Validate all data
+        required_fields = ["name", "age", "income", "household_count", "vehicle_count", "children_count"]
+        if all(field in data for field in required_fields):
+            with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO responses (name, age, income, household_count, vehicle_count, children_count) VALUES (%s, %s, %s, %s, %s, %s)", 
+                                (data["name"], data["age"], data["income"], data["household_count"], data["vehicle_count"], data["children_count"]))
+                conn.commit()
+    
+            os.remove(DATA_FILE)  # Clear the temporary data
+            response_message = "Thank you for providing all the information!"
+        else:
+            response_message = "Some information seems missing. Please continue."
+
+    # Save data
+    with open(DATA_FILE, 'w') as file:
+        json.dump(data, file)
 
     return jsonify({"message": response_message})
 
 if __name__ == '__main__':
+    init_db()
     app.run(host='0.0.0.0', port=81)
